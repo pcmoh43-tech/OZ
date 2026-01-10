@@ -1,4 +1,5 @@
-from fastapi import FastAPI, APIRouter, UploadFile, File, HTTPException
+from fastapi import FastAPI, APIRouter, UploadFile, File, HTTPException, Form
+from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -10,6 +11,7 @@ from typing import List, Optional
 import uuid
 from datetime import datetime, timezone
 import tempfile
+import io
 from emergentintegrations.llm.openai import OpenAISpeechToText
 
 ROOT_DIR = Path(__file__).parent
@@ -56,7 +58,10 @@ async def root():
     return {"message": "Speech to Text API"}
 
 @api_router.post("/transcribe", response_model=TranscribeResponse)
-async def transcribe_audio(file: UploadFile = File(...)):
+async def transcribe_audio(
+    file: UploadFile = File(...),
+    language: str = Form(default="ar")
+):
     """Transcribe audio file to text using OpenAI Whisper"""
     
     # Validate file type
@@ -74,20 +79,36 @@ async def transcribe_audio(file: UploadFile = File(...)):
     if len(contents) > 25 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="File size exceeds 25MB limit")
     
+    # Validate language
+    supported_languages = ['ar', 'en', 'auto']
+    if language not in supported_languages:
+        language = 'ar'
+    
     try:
         # Create temporary file
         with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{file_ext}') as tmp_file:
             tmp_file.write(contents)
             tmp_file_path = tmp_file.name
         
+        # Prepare transcription options
+        transcribe_opts = {
+            "file": None,
+            "model": "whisper-1",
+            "response_format": "json"
+        }
+        
+        # Add language hint (for Arabic dialects like Iraqi, provide context)
+        if language == 'ar':
+            transcribe_opts["language"] = "ar"
+            transcribe_opts["prompt"] = "هذا تسجيل صوتي باللغة العربية، قد يحتوي على لهجات عربية مختلفة مثل اللهجة العراقية أو الخليجية أو المصرية."
+        elif language == 'en':
+            transcribe_opts["language"] = "en"
+        # For 'auto', don't specify language to let Whisper detect
+        
         # Transcribe using OpenAI Whisper
         with open(tmp_file_path, "rb") as audio_file:
-            response = await stt.transcribe(
-                file=audio_file,
-                model="whisper-1",
-                language="ar",  # Arabic language
-                response_format="json"
-            )
+            transcribe_opts["file"] = audio_file
+            response = await stt.transcribe(**transcribe_opts)
         
         # Cleanup temp file
         os.unlink(tmp_file_path)
@@ -106,6 +127,123 @@ async def transcribe_audio(file: UploadFile = File(...)):
             except:
                 pass
         raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
+
+
+class ExportRequest(BaseModel):
+    text: str
+    format: str = "txt"  # txt or pdf
+    filename: str = "transcription"
+
+
+@api_router.post("/export")
+async def export_text(request: ExportRequest):
+    """Export text as TXT or PDF file"""
+    
+    if request.format == "txt":
+        # Create TXT file
+        content = request.text.encode('utf-8')
+        headers = {
+            'Content-Disposition': f'attachment; filename="{request.filename}.txt"',
+            'Content-Type': 'text/plain; charset=utf-8'
+        }
+        return StreamingResponse(
+            io.BytesIO(content),
+            headers=headers,
+            media_type='text/plain'
+        )
+    
+    elif request.format == "pdf":
+        try:
+            from reportlab.lib.pagesizes import A4
+            from reportlab.pdfgen import canvas
+            from reportlab.pdfbase import pdfmetrics
+            from reportlab.pdfbase.ttfonts import TTFont
+            from reportlab.lib.units import inch
+            import arabic_reshaper
+            from bidi.algorithm import get_display
+            
+            # Create PDF in memory
+            buffer = io.BytesIO()
+            c = canvas.Canvas(buffer, pagesize=A4)
+            width, height = A4
+            
+            # Try to use Arabic font
+            try:
+                # Use a system font that supports Arabic
+                pdfmetrics.registerFont(TTFont('Arabic', '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'))
+                font_name = 'Arabic'
+            except:
+                font_name = 'Helvetica'
+            
+            c.setFont(font_name, 14)
+            
+            # Process Arabic text for proper RTL display
+            try:
+                reshaped_text = arabic_reshaper.reshape(request.text)
+                bidi_text = get_display(reshaped_text)
+            except:
+                bidi_text = request.text
+            
+            # Split text into lines
+            lines = bidi_text.split('\n')
+            y_position = height - inch
+            line_height = 20
+            
+            for line in lines:
+                # Word wrap for long lines
+                words = line.split()
+                current_line = ""
+                
+                for word in words:
+                    test_line = current_line + " " + word if current_line else word
+                    if c.stringWidth(test_line, font_name, 14) < width - 2*inch:
+                        current_line = test_line
+                    else:
+                        if current_line:
+                            # Right align for Arabic
+                            text_width = c.stringWidth(current_line, font_name, 14)
+                            c.drawString(width - inch - text_width, y_position, current_line)
+                            y_position -= line_height
+                            
+                            if y_position < inch:
+                                c.showPage()
+                                c.setFont(font_name, 14)
+                                y_position = height - inch
+                        
+                        current_line = word
+                
+                if current_line:
+                    text_width = c.stringWidth(current_line, font_name, 14)
+                    c.drawString(width - inch - text_width, y_position, current_line)
+                    y_position -= line_height
+                    
+                    if y_position < inch:
+                        c.showPage()
+                        c.setFont(font_name, 14)
+                        y_position = height - inch
+            
+            c.save()
+            buffer.seek(0)
+            
+            headers = {
+                'Content-Disposition': f'attachment; filename="{request.filename}.pdf"',
+                'Content-Type': 'application/pdf'
+            }
+            return StreamingResponse(
+                buffer,
+                headers=headers,
+                media_type='application/pdf'
+            )
+            
+        except ImportError:
+            # Fallback to simple text export if PDF libraries not available
+            raise HTTPException(
+                status_code=500,
+                detail="PDF export not available. Please use TXT format."
+            )
+    
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported format. Use 'txt' or 'pdf'")
 
 @api_router.post("/transcriptions", response_model=Transcription)
 async def save_transcription(input: TranscriptionCreate):
