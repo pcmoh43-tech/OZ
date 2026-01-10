@@ -190,6 +190,147 @@ class SpeechToTextAPITester:
             self.log_test("Transcribe Endpoint Structure", False, str(e))
             return False
 
+    def test_transcribe_language_parameter(self):
+        """Test transcribe endpoint with language parameter (without actual audio)"""
+        try:
+            # Test with language parameter but no file - should still return 422 but accept the language param
+            data = {"language": "ar"}
+            response = requests.post(f"{self.api_url}/transcribe", data=data, timeout=10)
+            
+            # We expect 422 for missing file, but language param should be accepted
+            success = response.status_code == 422
+            details = f"Status: {response.status_code} (Expected 422 for missing file with language param)"
+            
+            # Test different language values
+            for lang in ["en", "auto"]:
+                data = {"language": lang}
+                response = requests.post(f"{self.api_url}/transcribe", data=data, timeout=10)
+                if response.status_code != 422:
+                    success = False
+                    details += f", Language '{lang}' failed with status {response.status_code}"
+                    break
+            
+            self.log_test("Transcribe Language Parameter", success, details)
+            return success
+        except Exception as e:
+            self.log_test("Transcribe Language Parameter", False, str(e))
+            return False
+
+    def test_export_txt_endpoint(self):
+        """Test export TXT endpoint"""
+        try:
+            test_data = {
+                "text": "هذا نص تجريبي للتصدير كملف TXT",
+                "format": "txt",
+                "filename": "test_export"
+            }
+            
+            response = requests.post(
+                f"{self.api_url}/export",
+                json=test_data,
+                headers={"Content-Type": "application/json"},
+                timeout=10
+            )
+            
+            success = response.status_code == 200
+            details = f"Status: {response.status_code}"
+            
+            if success:
+                # Check if response is a file download
+                content_type = response.headers.get('Content-Type', '')
+                content_disposition = response.headers.get('Content-Disposition', '')
+                details += f", Content-Type: {content_type}, Content-Disposition: {content_disposition}"
+                
+                # Verify it's a text file download
+                if 'text/plain' in content_type and 'attachment' in content_disposition:
+                    details += ", Valid TXT export"
+                else:
+                    success = False
+                    details += ", Invalid file response"
+            else:
+                details += f", Error: {response.text[:100]}"
+                
+            self.log_test("Export TXT Endpoint", success, details)
+            return success
+        except Exception as e:
+            self.log_test("Export TXT Endpoint", False, str(e))
+            return False
+
+    def test_export_pdf_endpoint(self):
+        """Test export PDF endpoint"""
+        try:
+            test_data = {
+                "text": "هذا نص تجريبي للتصدير كملف PDF مع دعم النص العربي",
+                "format": "pdf",
+                "filename": "test_export_pdf"
+            }
+            
+            response = requests.post(
+                f"{self.api_url}/export",
+                json=test_data,
+                headers={"Content-Type": "application/json"},
+                timeout=15  # PDF generation might take longer
+            )
+            
+            success = response.status_code == 200
+            details = f"Status: {response.status_code}"
+            
+            if success:
+                # Check if response is a PDF file download
+                content_type = response.headers.get('Content-Type', '')
+                content_disposition = response.headers.get('Content-Disposition', '')
+                details += f", Content-Type: {content_type}, Content-Disposition: {content_disposition}"
+                
+                # Verify it's a PDF file download
+                if 'application/pdf' in content_type and 'attachment' in content_disposition:
+                    details += ", Valid PDF export"
+                    # Check if PDF content starts with PDF signature
+                    if response.content[:4] == b'%PDF':
+                        details += ", Valid PDF format"
+                    else:
+                        success = False
+                        details += ", Invalid PDF format"
+                else:
+                    success = False
+                    details += ", Invalid file response"
+            else:
+                details += f", Error: {response.text[:100]}"
+                
+            self.log_test("Export PDF Endpoint", success, details)
+            return success
+        except Exception as e:
+            self.log_test("Export PDF Endpoint", False, str(e))
+            return False
+
+    def test_export_invalid_format(self):
+        """Test export endpoint with invalid format"""
+        try:
+            test_data = {
+                "text": "Test text",
+                "format": "invalid_format",
+                "filename": "test"
+            }
+            
+            response = requests.post(
+                f"{self.api_url}/export",
+                json=test_data,
+                headers={"Content-Type": "application/json"},
+                timeout=10
+            )
+            
+            # Should return 400 for invalid format
+            success = response.status_code == 400
+            details = f"Status: {response.status_code} (Expected 400 for invalid format)"
+            
+            if not success:
+                details += f", Unexpected response: {response.text[:100]}"
+                
+            self.log_test("Export Invalid Format", success, details)
+            return success
+        except Exception as e:
+            self.log_test("Export Invalid Format", False, str(e))
+            return False
+
     def run_all_tests(self):
         """Run all backend API tests"""
         print("🚀 Starting Speech-to-Text API Tests...")
