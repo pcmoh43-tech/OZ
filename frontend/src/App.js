@@ -5,7 +5,19 @@ import { Toaster, toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Separator } from "@/components/ui/separator";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Mic,
   Square,
@@ -20,6 +32,10 @@ import {
   Save,
   Loader2,
   Volume2,
+  Download,
+  FileText,
+  FileType,
+  Languages,
 } from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
@@ -41,6 +57,13 @@ const PUNCTUATION_MARKS = [
   { label: "...", name: "حذف" },
 ];
 
+// Language options
+const LANGUAGES = [
+  { value: "ar", label: "العربية", icon: "🇸🇦" },
+  { value: "en", label: "English", icon: "🇺🇸" },
+  { value: "auto", label: "تلقائي", icon: "🌐" },
+];
+
 function App() {
   const [text, setText] = useState("");
   const [isRecording, setIsRecording] = useState(false);
@@ -50,6 +73,8 @@ function App() {
   const [history, setHistory] = useState([]);
   const [showHistory, setShowHistory] = useState(false);
   const [dragOver, setDragOver] = useState(false);
+  const [selectedLanguage, setSelectedLanguage] = useState("ar");
+  const [isExporting, setIsExporting] = useState(false);
   
   const textareaRef = useRef(null);
   const mediaRecorderRef = useRef(null);
@@ -120,6 +145,7 @@ function App() {
     try {
       const formData = new FormData();
       formData.append("file", audioBlob, filename);
+      formData.append("language", selectedLanguage);
 
       const response = await axios.post(`${API}/transcribe`, formData, {
         headers: { "Content-Type": "multipart/form-data" },
@@ -140,7 +166,6 @@ function App() {
   const handleFileUpload = async (file) => {
     if (!file) return;
     
-    const allowedTypes = ["audio/mp3", "audio/mpeg", "audio/wav", "audio/webm", "audio/m4a", "audio/mp4", "audio/ogg"];
     const fileExt = file.name.split(".").pop().toLowerCase();
     const allowedExts = ["mp3", "mp4", "mpeg", "mpga", "m4a", "wav", "webm", "ogg"];
     
@@ -162,7 +187,7 @@ function App() {
     setDragOver(false);
     const file = e.dataTransfer.files[0];
     if (file) handleFileUpload(file);
-  }, []);
+  }, [selectedLanguage]);
 
   const handleDragOver = useCallback((e) => {
     e.preventDefault();
@@ -184,7 +209,6 @@ function App() {
     
     setText(newText);
     
-    // Set cursor position after inserted mark
     setTimeout(() => {
       textarea.focus();
       textarea.setSelectionRange(start + mark.length, start + mark.length);
@@ -217,6 +241,47 @@ function App() {
       fetchHistory();
     } catch (error) {
       toast.error("فشل في الحفظ");
+    }
+  };
+
+  const exportText = async (format) => {
+    if (!text.trim()) {
+      toast.error("لا يوجد نص للتصدير");
+      return;
+    }
+
+    setIsExporting(true);
+    
+    try {
+      const response = await axios.post(
+        `${API}/export`,
+        {
+          text: text.trim(),
+          format: format,
+          filename: `transcription_${new Date().toISOString().slice(0, 10)}`,
+        },
+        { responseType: 'blob' }
+      );
+
+      // Create download link
+      const blob = new Blob([response.data], { 
+        type: format === 'pdf' ? 'application/pdf' : 'text/plain' 
+      });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `transcription_${new Date().toISOString().slice(0, 10)}.${format}`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+      
+      toast.success(`تم تصدير الملف بصيغة ${format.toUpperCase()}`);
+    } catch (error) {
+      console.error("Export error:", error);
+      toast.error("فشل في التصدير");
+    } finally {
+      setIsExporting(false);
     }
   };
 
@@ -295,6 +360,38 @@ function App() {
           {/* Sidebar - Audio Input */}
           <div className="lg:col-span-4 flex flex-col gap-6">
             
+            {/* Language Selection Card */}
+            <Card className="p-6 bg-white dark:bg-slate-800 border-slate-100 dark:border-slate-700 shadow-[0_4px_20px_-2px_rgba(0,0,0,0.05)]">
+              <div className="flex items-center gap-2 mb-4">
+                <Languages className="w-5 h-5 text-amber-500" />
+                <h2 className="text-lg font-semibold text-slate-900 dark:text-white">
+                  لغة التسجيل
+                </h2>
+              </div>
+              
+              <Select value={selectedLanguage} onValueChange={setSelectedLanguage}>
+                <SelectTrigger className="w-full" data-testid="language-select">
+                  <SelectValue placeholder="اختر اللغة" />
+                </SelectTrigger>
+                <SelectContent>
+                  {LANGUAGES.map((lang) => (
+                    <SelectItem key={lang.value} value={lang.value}>
+                      <span className="flex items-center gap-2">
+                        <span>{lang.icon}</span>
+                        <span>{lang.label}</span>
+                      </span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              
+              {selectedLanguage === "ar" && (
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-2">
+                  يدعم جميع اللهجات العربية (العراقية، الخليجية، المصرية، الشامية)
+                </p>
+              )}
+            </Card>
+
             {/* Record Card */}
             <Card className="p-6 bg-white dark:bg-slate-800 border-slate-100 dark:border-slate-700 shadow-[0_4px_20px_-2px_rgba(0,0,0,0.05)]">
               <h2 className="text-lg font-semibold text-slate-900 dark:text-white mb-4">
@@ -450,6 +547,36 @@ function App() {
                     <Save className="w-4 h-4 ml-1" />
                     حفظ
                   </Button>
+
+                  {/* Export Dropdown */}
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={!text || isExporting}
+                        className="text-slate-500 hover:text-blue-500"
+                        data-testid="export-btn"
+                      >
+                        {isExporting ? (
+                          <Loader2 className="w-4 h-4 ml-1 animate-spin" />
+                        ) : (
+                          <Download className="w-4 h-4 ml-1" />
+                        )}
+                        تصدير
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem onClick={() => exportText('txt')} data-testid="export-txt">
+                        <FileText className="w-4 h-4 ml-2" />
+                        تصدير كـ TXT
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => exportText('pdf')} data-testid="export-pdf">
+                        <FileType className="w-4 h-4 ml-2" />
+                        تصدير كـ PDF
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                   
                   <Button
                     variant="default"
