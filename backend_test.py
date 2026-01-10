@@ -345,6 +345,14 @@ class SpeechToTextAPITester:
         # Test transcribe endpoint structure
         self.test_transcribe_endpoint_structure()
         
+        # Test NEW FEATURE: Language parameter in transcribe endpoint
+        self.test_transcribe_language_parameter()
+        
+        # Test NEW FEATURE: Export endpoints
+        self.test_export_txt_endpoint()
+        self.test_export_pdf_endpoint()
+        self.test_export_invalid_format()
+        
         # Test transcriptions CRUD
         success, existing_transcriptions = self.test_transcriptions_get_empty()
         
