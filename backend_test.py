@@ -331,6 +331,65 @@ class SpeechToTextAPITester:
             self.log_test("Export Invalid Format", False, str(e))
             return False
 
+    def test_mode_status_endpoint(self):
+        """Test mode-status endpoint for offline/online availability"""
+        try:
+            response = requests.get(f"{self.api_url}/mode-status", timeout=10)
+            success = response.status_code == 200
+            details = f"Status: {response.status_code}"
+            
+            if success:
+                data = response.json()
+                online_available = data.get('online_available', False)
+                offline_available = data.get('offline_available', False)
+                current_mode = data.get('current_mode', 'unknown')
+                
+                details += f", Online: {online_available}, Offline: {offline_available}, Current: {current_mode}"
+                
+                # Verify response structure
+                if 'online_available' in data and 'offline_available' in data and 'current_mode' in data:
+                    details += ", Valid response structure"
+                else:
+                    success = False
+                    details += ", Invalid response structure"
+            else:
+                details += f", Error: {response.text[:100]}"
+                
+            self.log_test("Mode Status Endpoint", success, details)
+            return success, response.json() if success else {}
+        except Exception as e:
+            self.log_test("Mode Status Endpoint", False, str(e))
+            return False, {}
+
+    def test_transcribe_mode_parameter(self):
+        """Test transcribe endpoint with mode parameter (without actual audio)"""
+        try:
+            # Test different mode values: auto, online, offline
+            modes = ["auto", "online", "offline"]
+            all_success = True
+            details_list = []
+            
+            for mode in modes:
+                data = {"language": "ar", "mode": mode}
+                response = requests.post(f"{self.api_url}/transcribe", data=data, timeout=10)
+                
+                # We expect 422 for missing file, but mode param should be accepted
+                mode_success = response.status_code == 422
+                mode_details = f"Mode '{mode}': Status {response.status_code}"
+                
+                if not mode_success:
+                    all_success = False
+                    mode_details += f" (Expected 422)"
+                
+                details_list.append(mode_details)
+            
+            details = ", ".join(details_list)
+            self.log_test("Transcribe Mode Parameter", all_success, details)
+            return all_success
+        except Exception as e:
+            self.log_test("Transcribe Mode Parameter", False, str(e))
+            return False
+
     def run_all_tests(self):
         """Run all backend API tests"""
         print("🚀 Starting Speech-to-Text API Tests...")
