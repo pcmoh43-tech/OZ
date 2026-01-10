@@ -401,13 +401,19 @@ class SpeechToTextAPITester:
             print("❌ API root endpoint failed - stopping tests")
             return self.generate_report()
         
+        # Test NEW FEATURE: Mode status endpoint
+        mode_success, mode_data = self.test_mode_status_endpoint()
+        
         # Test transcribe endpoint structure
         self.test_transcribe_endpoint_structure()
         
-        # Test NEW FEATURE: Language parameter in transcribe endpoint
+        # Test UPDATED FEATURE: Language parameter in transcribe endpoint
         self.test_transcribe_language_parameter()
         
-        # Test NEW FEATURE: Export endpoints
+        # Test NEW FEATURE: Mode parameter in transcribe endpoint
+        self.test_transcribe_mode_parameter()
+        
+        # Test EXISTING FEATURE: Export endpoints
         self.test_export_txt_endpoint()
         self.test_export_pdf_endpoint()
         self.test_export_invalid_format()
