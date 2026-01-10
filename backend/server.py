@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timezone
 import tempfile
 import io
-from emergentintegrations.llm.openai import OpenAISpeechToText
+import asyncio
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -28,8 +28,32 @@ app = FastAPI()
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
 
-# Initialize Speech-to-Text
-stt = OpenAISpeechToText(api_key=os.getenv("EMERGENT_LLM_KEY"))
+# Initialize Speech-to-Text services
+stt_online = None
+whisper_model = None
+
+# Try to initialize online STT
+try:
+    from emergentintegrations.llm.openai import OpenAISpeechToText
+    stt_online = OpenAISpeechToText(api_key=os.getenv("EMERGENT_LLM_KEY"))
+except Exception as e:
+    logging.warning(f"Online STT not available: {e}")
+
+# Try to initialize offline Whisper model
+def get_whisper_model():
+    global whisper_model
+    if whisper_model is None:
+        try:
+            from faster_whisper import WhisperModel
+            # Use 'base' model for balance between speed and accuracy
+            # Options: tiny, base, small, medium, large-v2, large-v3
+            whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
+            logging.info("Offline Whisper model loaded successfully")
+        except Exception as e:
+            logging.error(f"Failed to load offline Whisper model: {e}")
+            whisper_model = None
+    return whisper_model
+
 
 # Define Models
 class Transcription(BaseModel):
@@ -51,18 +75,97 @@ class TranscriptionUpdate(BaseModel):
 class TranscribeResponse(BaseModel):
     text: str
     filename: str
+    mode: str = "online"  # online or offline
+
+class ModeStatus(BaseModel):
+    online_available: bool
+    offline_available: bool
+    current_mode: str
+
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 
 # Routes
 @api_router.get("/")
 async def root():
     return {"message": "Speech to Text API"}
 
+
+@api_router.get("/mode-status", response_model=ModeStatus)
+async def get_mode_status():
+    """Check which transcription modes are available"""
+    offline_model = get_whisper_model()
+    return ModeStatus(
+        online_available=stt_online is not None,
+        offline_available=offline_model is not None,
+        current_mode="both" if (stt_online and offline_model) else ("online" if stt_online else ("offline" if offline_model else "none"))
+    )
+
+
+def transcribe_offline(file_path: str, language: str) -> str:
+    """Transcribe audio using local Whisper model"""
+    model = get_whisper_model()
+    if model is None:
+        raise Exception("Offline model not available")
+    
+    # Map language codes
+    lang_map = {"ar": "ar", "en": "en", "auto": None}
+    lang = lang_map.get(language)
+    
+    # Transcribe
+    segments, info = model.transcribe(
+        file_path,
+        language=lang,
+        beam_size=5,
+        vad_filter=True,  # Filter out silence
+        vad_parameters=dict(min_silence_duration_ms=500)
+    )
+    
+    # Combine segments
+    text_parts = []
+    for segment in segments:
+        text_parts.append(segment.text.strip())
+    
+    return " ".join(text_parts)
+
+
+async def transcribe_online(file_path: str, language: str) -> str:
+    """Transcribe audio using OpenAI Whisper API"""
+    if stt_online is None:
+        raise Exception("Online API not available")
+    
+    transcribe_opts = {
+        "file": None,
+        "model": "whisper-1",
+        "response_format": "json"
+    }
+    
+    if language == 'ar':
+        transcribe_opts["language"] = "ar"
+        transcribe_opts["prompt"] = "هذا تسجيل صوتي باللغة العربية، قد يحتوي على لهجات عربية مختلفة مثل اللهجة العراقية أو الخليجية أو المصرية."
+    elif language == 'en':
+        transcribe_opts["language"] = "en"
+    
+    with open(file_path, "rb") as audio_file:
+        transcribe_opts["file"] = audio_file
+        response = await stt_online.transcribe(**transcribe_opts)
+    
+    return response.text
+
+
 @api_router.post("/transcribe", response_model=TranscribeResponse)
 async def transcribe_audio(
     file: UploadFile = File(...),
-    language: str = Form(default="ar")
+    language: str = Form(default="ar"),
+    mode: str = Form(default="auto")  # auto, online, offline
 ):
-    """Transcribe audio file to text using OpenAI Whisper"""
+    """Transcribe audio file to text using OpenAI Whisper (online or offline)"""
     
     # Validate file type
     allowed_extensions = ['mp3', 'mp4', 'mpeg', 'mpga', 'm4a', 'wav', 'webm', 'ogg']
@@ -90,34 +193,53 @@ async def transcribe_audio(
             tmp_file.write(contents)
             tmp_file_path = tmp_file.name
         
-        # Prepare transcription options
-        transcribe_opts = {
-            "file": None,
-            "model": "whisper-1",
-            "response_format": "json"
-        }
+        result_text = ""
+        used_mode = ""
         
-        # Add language hint (for Arabic dialects like Iraqi, provide context)
-        if language == 'ar':
-            transcribe_opts["language"] = "ar"
-            transcribe_opts["prompt"] = "هذا تسجيل صوتي باللغة العربية، قد يحتوي على لهجات عربية مختلفة مثل اللهجة العراقية أو الخليجية أو المصرية."
-        elif language == 'en':
-            transcribe_opts["language"] = "en"
-        # For 'auto', don't specify language to let Whisper detect
-        
-        # Transcribe using OpenAI Whisper
-        with open(tmp_file_path, "rb") as audio_file:
-            transcribe_opts["file"] = audio_file
-            response = await stt.transcribe(**transcribe_opts)
+        # Determine which mode to use
+        if mode == "offline":
+            # Force offline
+            result_text = await asyncio.get_event_loop().run_in_executor(
+                None, transcribe_offline, tmp_file_path, language
+            )
+            used_mode = "offline"
+        elif mode == "online":
+            # Force online
+            result_text = await transcribe_online(tmp_file_path, language)
+            used_mode = "online"
+        else:
+            # Auto mode: try online first, fallback to offline
+            try:
+                if stt_online:
+                    result_text = await transcribe_online(tmp_file_path, language)
+                    used_mode = "online"
+                else:
+                    raise Exception("Online not available")
+            except Exception as online_error:
+                logger.warning(f"Online transcription failed: {online_error}, trying offline...")
+                try:
+                    result_text = await asyncio.get_event_loop().run_in_executor(
+                        None, transcribe_offline, tmp_file_path, language
+                    )
+                    used_mode = "offline"
+                except Exception as offline_error:
+                    logger.error(f"Offline transcription also failed: {offline_error}")
+                    raise HTTPException(
+                        status_code=500, 
+                        detail="Both online and offline transcription failed"
+                    )
         
         # Cleanup temp file
         os.unlink(tmp_file_path)
         
         return TranscribeResponse(
-            text=response.text,
-            filename=file.filename or "audio"
+            text=result_text,
+            filename=file.filename or "audio",
+            mode=used_mode
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Transcription error: {str(e)}")
         # Cleanup temp file on error
@@ -169,7 +291,6 @@ async def export_text(request: ExportRequest):
             
             # Try to use Arabic font
             try:
-                # Use a system font that supports Arabic
                 pdfmetrics.registerFont(TTFont('Arabic', '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'))
                 font_name = 'Arabic'
             except:
@@ -190,7 +311,6 @@ async def export_text(request: ExportRequest):
             line_height = 20
             
             for line in lines:
-                # Word wrap for long lines
                 words = line.split()
                 current_line = ""
                 
@@ -200,7 +320,6 @@ async def export_text(request: ExportRequest):
                         current_line = test_line
                     else:
                         if current_line:
-                            # Right align for Arabic
                             text_width = c.stringWidth(current_line, font_name, 14)
                             c.drawString(width - inch - text_width, y_position, current_line)
                             y_position -= line_height
@@ -236,7 +355,6 @@ async def export_text(request: ExportRequest):
             )
             
         except ImportError:
-            # Fallback to simple text export if PDF libraries not available
             raise HTTPException(
                 status_code=500,
                 detail="PDF export not available. Please use TXT format."
@@ -244,6 +362,7 @@ async def export_text(request: ExportRequest):
     
     else:
         raise HTTPException(status_code=400, detail="Unsupported format. Use 'txt' or 'pdf'")
+
 
 @api_router.post("/transcriptions", response_model=Transcription)
 async def save_transcription(input: TranscriptionCreate):
@@ -256,6 +375,7 @@ async def save_transcription(input: TranscriptionCreate):
     await db.transcriptions.insert_one(doc)
     return transcription
 
+
 @api_router.get("/transcriptions", response_model=List[Transcription])
 async def get_transcriptions():
     """Get all saved transcriptions"""
@@ -266,6 +386,7 @@ async def get_transcriptions():
             t['created_at'] = datetime.fromisoformat(t['created_at'])
     
     return transcriptions
+
 
 @api_router.get("/transcriptions/{transcription_id}", response_model=Transcription)
 async def get_transcription(transcription_id: str):
@@ -280,6 +401,7 @@ async def get_transcription(transcription_id: str):
     
     return transcription
 
+
 @api_router.put("/transcriptions/{transcription_id}", response_model=Transcription)
 async def update_transcription(transcription_id: str, input: TranscriptionUpdate):
     """Update a transcription"""
@@ -293,6 +415,7 @@ async def update_transcription(transcription_id: str, input: TranscriptionUpdate
     
     return await get_transcription(transcription_id)
 
+
 @api_router.delete("/transcriptions/{transcription_id}")
 async def delete_transcription(transcription_id: str):
     """Delete a transcription"""
@@ -302,6 +425,7 @@ async def delete_transcription(transcription_id: str):
         raise HTTPException(status_code=404, detail="Transcription not found")
     
     return {"message": "Transcription deleted successfully"}
+
 
 # Include the router in the main app
 app.include_router(api_router)
@@ -314,12 +438,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+
+@app.on_event("startup")
+async def startup_event():
+    # Pre-load offline model in background
+    logger.info("Starting up... Loading offline Whisper model...")
+    get_whisper_model()
+
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
