@@ -36,6 +36,10 @@ import {
   FileText,
   FileType,
   Languages,
+  Wifi,
+  WifiOff,
+  Cloud,
+  HardDrive,
 } from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
@@ -64,6 +68,13 @@ const LANGUAGES = [
   { value: "auto", label: "تلقائي", icon: "🌐" },
 ];
 
+// Mode options
+const MODES = [
+  { value: "auto", label: "تلقائي", icon: Cloud, description: "يختار الأفضل تلقائياً" },
+  { value: "online", label: "أونلاين", icon: Wifi, description: "يستخدم الإنترنت (أدق)" },
+  { value: "offline", label: "بدون إنترنت", icon: WifiOff, description: "يعمل محلياً (أسرع)" },
+];
+
 function App() {
   const [text, setText] = useState("");
   const [isRecording, setIsRecording] = useState(false);
@@ -74,16 +85,20 @@ function App() {
   const [showHistory, setShowHistory] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [selectedLanguage, setSelectedLanguage] = useState("ar");
+  const [selectedMode, setSelectedMode] = useState("auto");
   const [isExporting, setIsExporting] = useState(false);
+  const [modeStatus, setModeStatus] = useState({ online_available: false, offline_available: false });
+  const [lastUsedMode, setLastUsedMode] = useState("");
   
   const textareaRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
   const fileInputRef = useRef(null);
 
-  // Load history on mount
+  // Load history and check mode status on mount
   useEffect(() => {
     fetchHistory();
+    checkModeStatus();
   }, []);
 
   // Apply dark mode
@@ -94,6 +109,15 @@ function App() {
       document.documentElement.classList.remove("dark");
     }
   }, [isDarkMode]);
+
+  const checkModeStatus = async () => {
+    try {
+      const response = await axios.get(`${API}/mode-status`);
+      setModeStatus(response.data);
+    } catch (error) {
+      console.error("Error checking mode status:", error);
+    }
+  };
 
   const fetchHistory = async () => {
     try {
@@ -146,6 +170,7 @@ function App() {
       const formData = new FormData();
       formData.append("file", audioBlob, filename);
       formData.append("language", selectedLanguage);
+      formData.append("mode", selectedMode);
 
       const response = await axios.post(`${API}/transcribe`, formData, {
         headers: { "Content-Type": "multipart/form-data" },
@@ -153,7 +178,10 @@ function App() {
 
       const newText = text ? `${text}\n\n${response.data.text}` : response.data.text;
       setText(newText);
-      toast.success("تم التحويل بنجاح!");
+      setLastUsedMode(response.data.mode);
+      
+      const modeLabel = response.data.mode === "online" ? "أونلاين" : "بدون إنترنت";
+      toast.success(`تم التحويل بنجاح! (${modeLabel})`);
     } catch (error) {
       console.error("Transcription error:", error);
       const errorMsg = error.response?.data?.detail || "فشل في تحويل الصوت";
@@ -187,7 +215,7 @@ function App() {
     setDragOver(false);
     const file = e.dataTransfer.files[0];
     if (file) handleFileUpload(file);
-  }, [selectedLanguage]);
+  }, [selectedLanguage, selectedMode]);
 
   const handleDragOver = useCallback((e) => {
     e.preventDefault();
@@ -263,7 +291,6 @@ function App() {
         { responseType: 'blob' }
       );
 
-      // Create download link
       const blob = new Blob([response.data], { 
         type: format === 'pdf' ? 'application/pdf' : 'text/plain' 
       });
@@ -307,6 +334,15 @@ function App() {
     toast.success("تم المسح");
   };
 
+  const getModeIcon = () => {
+    const mode = MODES.find(m => m.value === selectedMode);
+    if (mode) {
+      const Icon = mode.icon;
+      return <Icon className="w-5 h-5" />;
+    }
+    return <Cloud className="w-5 h-5" />;
+  };
+
   return (
     <div className="app-container min-h-screen bg-[#fdfbf7] dark:bg-[#0f172a]" dir="rtl">
       <Toaster position="top-center" richColors />
@@ -324,12 +360,27 @@ function App() {
                   تحويل الصوت إلى نص
                 </h1>
                 <p className="text-sm text-slate-500 dark:text-slate-400">
-                  حوّل تسجيلاتك الصوتية إلى نص مكتوب
+                  يعمل بدون إنترنت أيضاً
                 </p>
               </div>
             </div>
             
             <div className="flex items-center gap-2">
+              {/* Mode Status Indicator */}
+              <div className="hidden sm:flex items-center gap-1 px-3 py-1 rounded-full bg-slate-100 dark:bg-slate-800 text-xs">
+                {modeStatus.offline_available ? (
+                  <span className="flex items-center gap-1 text-green-600 dark:text-green-400">
+                    <HardDrive className="w-3 h-3" />
+                    جاهز
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400">
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    تحميل...
+                  </span>
+                )}
+              </div>
+              
               <Button
                 variant="ghost"
                 size="icon"
@@ -360,6 +411,47 @@ function App() {
           {/* Sidebar - Audio Input */}
           <div className="lg:col-span-4 flex flex-col gap-6">
             
+            {/* Mode Selection Card */}
+            <Card className="p-6 bg-white dark:bg-slate-800 border-slate-100 dark:border-slate-700 shadow-[0_4px_20px_-2px_rgba(0,0,0,0.05)]">
+              <div className="flex items-center gap-2 mb-4">
+                {getModeIcon()}
+                <h2 className="text-lg font-semibold text-slate-900 dark:text-white">
+                  وضع التحويل
+                </h2>
+              </div>
+              
+              <Select value={selectedMode} onValueChange={setSelectedMode}>
+                <SelectTrigger className="w-full" data-testid="mode-select">
+                  <SelectValue placeholder="اختر الوضع" />
+                </SelectTrigger>
+                <SelectContent>
+                  {MODES.map((mode) => {
+                    const Icon = mode.icon;
+                    const isDisabled = 
+                      (mode.value === "online" && !modeStatus.online_available) ||
+                      (mode.value === "offline" && !modeStatus.offline_available);
+                    
+                    return (
+                      <SelectItem 
+                        key={mode.value} 
+                        value={mode.value}
+                        disabled={isDisabled}
+                      >
+                        <span className="flex items-center gap-2">
+                          <Icon className="w-4 h-4" />
+                          <span>{mode.label}</span>
+                        </span>
+                      </SelectItem>
+                    );
+                  })}
+                </SelectContent>
+              </Select>
+              
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-2">
+                {MODES.find(m => m.value === selectedMode)?.description}
+              </p>
+            </Card>
+
             {/* Language Selection Card */}
             <Card className="p-6 bg-white dark:bg-slate-800 border-slate-100 dark:border-slate-700 shadow-[0_4px_20px_-2px_rgba(0,0,0,0.05)]">
               <div className="flex items-center gap-2 mb-4">
@@ -521,6 +613,15 @@ function App() {
                   <span className="text-sm font-medium text-slate-700 dark:text-slate-300">
                     النص المحوّل
                   </span>
+                  {lastUsedMode && (
+                    <span className={`text-xs px-2 py-0.5 rounded-full ${
+                      lastUsedMode === "offline" 
+                        ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+                        : "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400"
+                    }`}>
+                      {lastUsedMode === "offline" ? "بدون إنترنت" : "أونلاين"}
+                    </span>
+                  )}
                 </div>
                 
                 <div className="flex items-center gap-2">
@@ -606,7 +707,7 @@ function App() {
                 <div className="flex items-center justify-center gap-3 py-4 bg-amber-50 dark:bg-amber-900/20">
                   <Loader2 className="w-5 h-5 text-amber-500 animate-spin" />
                   <span className="text-sm text-amber-700 dark:text-amber-400">
-                    جاري التحويل...
+                    جاري التحويل... {selectedMode === "offline" ? "(بدون إنترنت)" : ""}
                   </span>
                 </div>
               )}
@@ -621,6 +722,9 @@ function App() {
                       </div>
                       <p className="text-slate-400 dark:text-slate-500">
                         سجّل صوتك أو ارفع ملف صوتي للبدء
+                      </p>
+                      <p className="text-xs text-slate-300 dark:text-slate-600 mt-2">
+                        يعمل بدون إنترنت
                       </p>
                     </div>
                   </div>
