@@ -1,231 +1,243 @@
 #Requires -RunAsAdministrator
-<#
-.SYNOPSIS
-    الاتصال بطابعة مشتركة على حاسوب آخر (Windows)
-.DESCRIPTION
-    يكتشف الطابعات المشتركة ويربطها ويضبط الإعدادات
-#>
+# Client PC - connect, install printer, test print (fixed for error 0x8007007b)
 
-$ErrorActionPreference = "Stop"
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$ErrorActionPreference = "Continue"
+$Port = 9876
 
-function Write-Header {
-    Clear-Host
-    Write-Host "============================================" -ForegroundColor Cyan
-    Write-Host "   الاتصال بطابعة مشتركة - الحاسوب العميل" -ForegroundColor Cyan
-    Write-Host "   (Client)" -ForegroundColor Cyan
-    Write-Host "============================================" -ForegroundColor Cyan
-    Write-Host ""
+function Write-Status([string]$Msg, [string]$Color = "White") {
+    Write-Host $Msg -ForegroundColor $Color
 }
 
-function Test-HostReachable {
-    param([string]$HostAddress)
+function Enable-ClientNetworkAccess {
+    Write-Status "  Enabling network printer access..." "Yellow"
+    Set-NetConnectionProfile -NetworkCategory Private -ErrorAction SilentlyContinue
+    netsh advfirewall firewall set rule group="File and Printer Sharing" new enable=Yes | Out-Null
+    reg add "HKLM\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters" /v AllowInsecureGuestAuth /t REG_DWORD /d 1 /f 2>$null | Out-Null
+    reg add "HKLM\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters" /v RequireSecuritySignature /t REG_DWORD /d 0 /f 2>$null | Out-Null
+    Write-Status "  OK" "Green"
+}
 
-    Write-Host "   جاري التحقق من الاتصال بـ $HostAddress..." -ForegroundColor Yellow
-    $ping = Test-Connection -ComputerName $HostAddress -Count 2 -Quiet -ErrorAction SilentlyContinue
-    if ($ping) {
-        Write-Host "   ✓ الحاسوب المضيف متصل" -ForegroundColor Green
-        return $true
+function Send-HostRequest {
+    param([string]$HostIP, [string]$Command)
+    $client = New-Object System.Net.Sockets.TcpClient
+    $client.ReceiveTimeout = 3000
+    $client.SendTimeout    = 3000
+    $client.Connect($HostIP, $Port)
+    $stream = $client.GetStream()
+    $writer = New-Object System.IO.StreamWriter($stream)
+    $reader = New-Object System.IO.StreamReader($stream)
+    $writer.AutoFlush = $true
+    $writer.WriteLine($Command)
+    $response = $reader.ReadLine()
+    $client.Close()
+    return $response
+}
+
+function Get-NetworkShares {
+    param([string]$HostIP)
+    Write-Status "  Checking shares on \\$HostIP ..." "Yellow"
+    $output = cmd /c "net view \\$HostIP 2>&1"
+    $shares = @()
+    foreach ($line in ($output -split "`n")) {
+        if ($line -match '^\s+(\S+)') {
+            $name = $Matches[1]
+            if ($name -notin @('Share', 'name', '----', 'The', 'System', 'IPC$')) {
+                $shares += $name
+            }
+        }
+    }
+    return $shares | Where-Object { $_ -and $_ -ne 'Share' -and $_ -notmatch '^-+$' } | Select-Object -Unique
+}
+
+function Connect-Share {
+    param(
+        [string]$UncPath,
+        [string]$Username = "",
+        [string]$Password = ""
+    )
+    cmd /c "net use `"$UncPath`" /delete /y" 2>$null | Out-Null
+    if ($Username) {
+        $result = cmd /c "net use `"$UncPath`" /user:$Username $Password 2>&1"
     }
     else {
-        Write-Host "   ✗ لا يمكن الوصول للحاسوب المضيف" -ForegroundColor Red
-        Write-Host "   تأكد من:" -ForegroundColor Yellow
-        Write-Host "     - كلا الحاسوبين على نفس شبكة الواي-فاي" -ForegroundColor White
-        Write-Host "     - عنوان IP صحيح" -ForegroundColor White
-        Write-Host "     - جدار الحماية يسمح بالاتصال" -ForegroundColor White
-        return $false
+        $result = cmd /c "net use `"$UncPath`" 2>&1"
     }
+    return ($LASTEXITCODE -eq 0) -or ($result -match "completed successfully|Command completed")
 }
 
-function Find-SharedPrinters {
-    param([string]$HostAddress)
-
-    Write-Host "`n   جاري البحث عن الطابعات المشتركة..." -ForegroundColor Yellow
-
-    $printers = @()
-    try {
-        $printers = Get-CimInstance -ClassName Win32_Printer -ComputerName $HostAddress -ErrorAction Stop |
-            Where-Object { $_.Shared -eq $true }
-    }
-    catch {
-        Write-Host "   تحذير: لم يتم العثور تلقائياً. سيتم الاتصال يدوياً." -ForegroundColor DarkYellow
-    }
-
-    return $printers
-}
-
-function Add-NetworkPrinter {
+function Install-SharedPrinter {
     param(
-        [string]$HostAddress,
+        [string]$HostIP,
         [string]$ShareName,
-        [string]$DisplayName
+        [string]$Hostname = ""
     )
 
-    $printerPath = "\\$HostAddress\$ShareName"
-    Write-Host "`n   جاري تثبيت الطابعة: $printerPath" -ForegroundColor Yellow
+    $candidates = @()
+    if ($HostIP -and $ShareName) { $candidates += "\\$HostIP\$ShareName" }
+    if ($Hostname -and $ShareName) { $candidates += "\\$Hostname\$ShareName" }
+    $candidates = $candidates | Select-Object -Unique
 
-    # Remove existing connection with same name if exists
-    $existing = Get-Printer -Name $DisplayName -ErrorAction SilentlyContinue
-    if ($existing) {
-        Remove-Printer -Name $DisplayName -ErrorAction SilentlyContinue
-    }
+    foreach ($path in $candidates) {
+        Write-Status "  Trying path: $path" "Yellow"
 
-    try {
-        Add-Printer -ConnectionName $printerPath -ErrorAction Stop
-        Write-Host "   ✓ تم تثبيت الطابعة بنجاح!" -ForegroundColor Green
-        return $true
-    }
-    catch {
-        # Fallback: use rundll32
-        Write-Host "   محاولة طريقة بديلة..." -ForegroundColor DarkYellow
-        $result = Start-Process -FilePath "rundll32.exe" -ArgumentList "printui.dll,PrintUIEntry /in /n `"$printerPath`"" -Wait -PassThru -NoNewWindow
-        if ($result.ExitCode -eq 0) {
-            Write-Host "   ✓ تم تثبيت الطابعة (طريقة بديلة)!" -ForegroundColor Green
+        # Step 1: connect share with net use
+        if (-not (Connect-Share -UncPath $path)) {
+            Write-Status "  Share login failed, trying with credentials..." "DarkYellow"
+            $user = Read-Host "  Host username (e.g. OZ\username) or Enter to skip"
+            if ($user) {
+                $pass = Read-Host "  Password" -AsSecureString
+                $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($pass)
+                $plain = [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+                Connect-Share -UncPath $path -Username $user -Password $plain | Out-Null
+            }
+        }
+
+        # Step 2: rundll32 (most reliable on Windows 10/11)
+        Write-Status "  Method 1: printui..." "DarkGray"
+        $proc = Start-Process "rundll32.exe" -ArgumentList "printui.dll,PrintUIEntry /in /n `"$path`"" -Wait -PassThru -NoNewWindow
+        Start-Sleep -Seconds 2
+        $installed = Get-Printer -ErrorAction SilentlyContinue | Where-Object {
+            $_.Name -like "*$ShareName*" -or $_.PortName -like "*$HostIP*" -or $_.Name -like "*$path*"
+        }
+        if ($installed) {
+            Write-Status "  OK - Installed: $($installed[0].Name)" "Green"
             return $true
         }
-        Write-Host "   ✗ فشل التثبيت: $($_.Exception.Message)" -ForegroundColor Red
+
+        # Step 3: Add-Printer
+        Write-Status "  Method 2: Add-Printer..." "DarkGray"
+        try {
+            Add-Printer -ConnectionName $path -ErrorAction Stop
+            Write-Status "  OK - Add-Printer worked!" "Green"
+            return $true
+        }
+        catch {
+            Write-Status "  Add-Printer failed: $($_.Exception.Message)" "DarkYellow"
+        }
+
+        # Step 4: WMI
+        Write-Status "  Method 3: WMI..." "DarkGray"
+        try {
+            ([WMIClass]"Win32_Printer").AddPrinterConnection($path) | Out-Null
+            Start-Sleep -Seconds 2
+            $installed = Get-Printer -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "*$ShareName*" }
+            if ($installed) {
+                Write-Status "  OK - WMI worked!" "Green"
+                return $true
+            }
+        }
+        catch {
+            Write-Status "  WMI failed: $($_.Exception.Message)" "DarkYellow"
+        }
+    }
+
+    return $false
+}
+
+function Send-TestPrint {
+    param([string]$ShareName)
+    Write-Status "  Sending test page..." "Yellow"
+    $printer = Get-Printer -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like "*$ShareName*" } |
+        Select-Object -First 1
+    if (-not $printer) {
+        $printer = Get-Printer -ErrorAction SilentlyContinue | Select-Object -Last 1
+    }
+    if (-not $printer) {
+        Write-Status "  No printer found to test!" "Red"
         return $false
     }
+    Set-Printer -Name $printer.Name -Default
+    $testFile = Join-Path $env:TEMP "r4-test-print.txt"
+    "Printer Test - $(Get-Date) - $($printer.Name)" | Set-Content $testFile -Encoding ASCII
+    Start-Process -FilePath $testFile -Verb Print -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+    Write-Status "  OK - Test sent to: $($printer.Name)" "Green"
+    return $true
 }
 
-function Set-PrinterOptions {
-    param(
-        [string]$PrinterName,
-        [bool]$SetAsDefault,
-        [bool]$TestPrint
-    )
+# ========== MAIN ==========
+Clear-Host
+Write-Status "============================================" "Cyan"
+Write-Status "   CLIENT - Connect Printer (Fixed)" "Cyan"
+Write-Status "============================================" "Cyan"
+Write-Host ""
 
-    if ($SetAsDefault) {
-        Write-Host "`n   تعيين كطابعة افتراضية..." -ForegroundColor Yellow
-        $printer = Get-Printer -Name $PrinterName -ErrorAction SilentlyContinue
-        if (-not $printer) {
-            # Find by connection name
-            $printer = Get-Printer | Where-Object { $_.Name -like "*$PrinterName*" } | Select-Object -First 1
-        }
-        if ($printer) {
-            Set-Printer -Name $printer.Name -Default
-            Write-Host "   ✓ تم تعيين '$($printer.Name)' كطابعة افتراضية" -ForegroundColor Green
-        }
-    }
+Enable-ClientNetworkAccess
 
-    if ($TestPrint) {
-        Write-Host "`n   إرسال صفحة اختبار..." -ForegroundColor Yellow
-        $printer = Get-Printer | Where-Object { $_.Name -like "*$PrinterName*" -or $_.ShareName -eq $PrinterName } | Select-Object -First 1
-        if ($printer) {
-            $testFile = Join-Path $env:TEMP "printer-test.txt"
-            @"
-================================
-   اختبار الطابعة - Printer Test
-================================
-التاريخ: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-الحاسوب: $env:COMPUTERNAME
-================================
-"@ | Set-Content -Path $testFile -Encoding UTF8
-
-            Start-Process -FilePath $testFile -Verb Print -ErrorAction SilentlyContinue
-            Write-Host "   ✓ تم إرسال صفحة الاختبار" -ForegroundColor Green
-        }
-    }
-}
-
-function Save-ClientConfig {
-    param(
-        [string]$HostAddress,
-        [string]$ShareName,
-        [string]$PrinterName
-    )
-
-    $configPath = Join-Path $PSScriptRoot "client-config.json"
-    @{
-        hostAddress = $HostAddress
-        shareName   = $ShareName
-        printerName = $PrinterName
-        connectedAt = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-    } | ConvertTo-Json | Set-Content -Path $configPath -Encoding UTF8
-
-    Write-Host "   ✓ تم حفظ الإعدادات في: $configPath" -ForegroundColor DarkGray
-}
-
-# ========== Main Menu ==========
-Write-Header
-
-# Check for saved host config
+$hostIp    = $null
+$shareName = $null
+$hostname  = $null
 $configPath = Join-Path $PSScriptRoot "host-config.json"
-$hostAddress = $null
 
 if (Test-Path $configPath) {
-    Write-Host "تم العثور على إعدادات محفوظة من الحاسوب المضيف." -ForegroundColor Green
-    $saved = Get-Content $configPath | ConvertFrom-Json
-    Write-Host "  IP: $($saved.ip) | المشاركة: $($saved.shareName)" -ForegroundColor White
-    $useSaved = Read-Host "`nاستخدام الإعدادات المحفوظة؟ [Y/n]"
-    if ($useSaved -ne "n" -and $useSaved -ne "N") {
-        $hostAddress = $saved.ip
-        $savedShareName = $saved.shareName
+    $saved = Get-Content $configPath -Raw | ConvertFrom-Json
+    Write-Status "Config: IP=$($saved.ip) Share=$($saved.shareName)" "Green"
+    if ((Read-Host "Use this? [Y/n]") -notmatch "^[Nn]") {
+        $hostIp    = $saved.ip
+        $shareName = $saved.shareName
+        $hostname  = $saved.hostname
     }
 }
 
-if (-not $hostAddress) {
-    Write-Host "أدخل معلومات الحاسوب الذي عليه الطابعة:" -ForegroundColor White
-    Write-Host ""
-    Write-Host "  1. بالعنوان IP (مثال: 192.168.1.50)"
-    Write-Host "  2. باسم الحاسوب (مثال: DESKTOP-ABC123)"
-    Write-Host ""
-    $inputType = Read-Host "طريقة الاتصال [1/2]"
-    $hostAddress = Read-Host "أدخل $(if ($inputType -eq '2') { 'اسم الحاسوب' } else { 'عنوان IP' })"
+if (-not $hostIp) {
+    $hostIp = Read-Host "Enter Host IP (PC with printer, NOT router)"
 }
 
-if (-not (Test-HostReachable -HostAddress $hostAddress)) {
-    Read-Host "`nاضغط Enter للخروج"
+if (-not (Test-Connection $hostIp -Count 2 -Quiet)) {
+    Write-Status "Cannot ping $hostIp - check WiFi network!" "Red"
+    Read-Host "Press Enter"
     exit 1
 }
 
-# Discover or manual share name
-$sharedPrinters = Find-SharedPrinters -HostAddress $hostAddress
-$shareName = $null
+Write-Status "[1/4] Reading shares from Host..." "Yellow"
+$shares = Get-NetworkShares -HostIP $hostIp
 
-if ($savedShareName) {
-    $shareName = $savedShareName
-    Write-Host "`n   استخدام المشاركة المحفوظة: $shareName" -ForegroundColor Cyan
-}
-elseif ($sharedPrinters.Count -gt 0) {
-    Write-Host "`nالطابعات المشتركة المكتشفة:" -ForegroundColor White
-    for ($i = 0; $i -lt $sharedPrinters.Count; $i++) {
-        Write-Host "  $($i + 1). $($sharedPrinters[$i].ShareName) ($($sharedPrinters[$i].Name))"
+if ($shares.Count -gt 0) {
+    Write-Status "  Shares found:" "Green"
+    for ($i = 0; $i -lt $shares.Count; $i++) {
+        Write-Host "    $($i + 1). $($shares[$i])"
     }
-    $sel = Read-Host "`nاختر رقم الطابعة"
-    $shareName = $sharedPrinters[[int]$sel - 1].ShareName
+    if (-not $shareName) {
+        $sel = Read-Host "Select share number"
+        $shareName = $shares[[int]$sel - 1]
+    }
 }
 else {
-    $shareName = Read-Host "`nأدخل اسم مشاركة الطابعة (Share Name)"
+    Write-Status "  Could not list shares (firewall or wrong IP)" "Yellow"
+    Write-Status "  TIP: Make sure IP is the PC not the router (.1)" "Yellow"
+    if (-not $shareName) {
+        $shareName = Read-Host "Enter share name manually (e.g. CanonGenericPlusUFRII)"
+    }
 }
 
-# Connection options
-Write-Host "`nخيارات الإعداد:" -ForegroundColor White
-$setDefault = Read-Host "  تعيين كطابعة افتراضية؟ [Y/n]"
-$doTestPrint = Read-Host "  طباعة صفحة اختبار؟ [Y/n]"
+Write-Host ""
+Write-Status "Target: \\$hostIp\$shareName" "Cyan"
+Write-Status "[2/4] Installing printer..." "Yellow"
 
-$setDefaultBool = ($setDefault -ne "n" -and $setDefault -ne "N")
-$testPrintBool = ($doTestPrint -ne "n" -and $doTestPrint -ne "N")
+$ok = Install-SharedPrinter -HostIP $hostIp -ShareName $shareName -Hostname $hostname
 
-# Install printer
-$success = Add-NetworkPrinter -HostAddress $hostAddress -ShareName $shareName -DisplayName $shareName
-
-if ($success) {
-    Set-PrinterOptions -PrinterName $shareName -SetAsDefault $setDefaultBool -TestPrint $testPrintBool
-    Save-ClientConfig -HostAddress $hostAddress -ShareName $shareName -PrinterName $shareName
-
-    Write-Host "`n============================================" -ForegroundColor Cyan
-    Write-Host "   تم الاتصال بالطابعة بنجاح!" -ForegroundColor Green
-    Write-Host "   المسار: \\$hostAddress\$shareName" -ForegroundColor White
-    Write-Host "============================================" -ForegroundColor Cyan
-}
-else {
-    Write-Host "`n============================================" -ForegroundColor Cyan
-    Write-Host "   فشل الاتصال. جرب:" -ForegroundColor Red
-    Write-Host "   1. تشغيل host-share-printer.ps1 على الحاسوب المضيف" -ForegroundColor White
-    Write-Host "   2. التأكد من نفس شبكة الواي-فاي" -ForegroundColor White
-    Write-Host "   3. إيقاف VPN مؤقتاً" -ForegroundColor White
-    Write-Host "============================================" -ForegroundColor Cyan
+if (-not $ok) {
+    Write-Host ""
+    Write-Status "FAILED! Try these fixes:" "Red"
+    Write-Status "  1. Run RUN-HOST.bat again on PC 1" "White"
+    Write-Status "  2. Use correct IP (not router .1)" "White"
+    Write-Status "  3. Both PCs on same WiFi" "White"
+    Write-Status "  4. Manual add: Settings > Printers > Add > \\$hostIp\$shareName" "White"
+    Read-Host "Press Enter"
+    exit 1
 }
 
-Read-Host "`nاضغط Enter للخروج"
+try { Send-HostRequest -HostIP $hostIp -Command "CONNECTED" | Out-Null } catch {}
+
+Write-Status "[3/4] Test print..." "Yellow"
+Send-TestPrint -ShareName $shareName | Out-Null
+
+try { Send-HostRequest -HostIP $hostIp -Command "TEST_PRINT" | Out-Null } catch {}
+
+Write-Host ""
+Write-Status "============================================" "Green"
+Write-Status "   SUCCESS! Printer installed" "Green"
+Write-Status "   \\$hostIp\$shareName" "White"
+Write-Status "============================================" "Green"
+Read-Host "Press Enter"
