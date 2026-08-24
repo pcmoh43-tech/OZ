@@ -1,0 +1,38 @@
+============================================
+  PrtEasyServer v2.0.0.0
+  Official file: PrtEasyServer.exe
+============================================
+
+HOW TO PUT ON YOUR WINDOWS DESKTOP
+----------------------------------
+Copy PrtEasyServer.exe to:
+  C:\Users\OZ\Desktop\PrtEasyServer.exe
+
+Or in PowerShell:
+  Invoke-WebRequest "https://github.com/Terence0816/Windows-PrtEasyServer/releases/download/v2.0.0.0/PrtEasyServer.exe" -OutFile "$env:USERPROFILE\Desktop\PrtEasyServer.exe"
+
+
+PC 1 (USB printer)
+------------------
+1. Copy PrtEasyServer.exe to Desktop
+2. Double-click PrtEasyServer.exe
+3. Select Canon printer
+4. Start sharing / start server
+5. Keep the program running
+6. Note the IP shown (NOT router .1)
+
+
+PC 2 (other computer)
+---------------------
+1. Copy the SAME PrtEasyServer.exe to Desktop
+2. On PC 1, open the built-in web page (shown in the program)
+   Example: http://192.168.x.x:PORT
+3. Download installer BAT + driver package
+4. Run the BAT on PC 2
+5. Print a test page
+
+
+Source
+------
+https://github.com/Terence0816/Windows-PrtEasyServer/releases/tag/v2.0.0.0
+============================================
