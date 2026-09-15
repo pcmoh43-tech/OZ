@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useLayoutEffect } from "react";
 import "@/App.css";
 import axios from "axios";
 import { Toaster, toast } from "sonner";
@@ -41,6 +41,8 @@ import {
   Cloud,
   HardDrive,
 } from "lucide-react";
+import HostText from "@/components/HostText";
+import { applyHostDirection, stripBidiMarks } from "@/lib/writing-direction";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -94,6 +96,30 @@ function App() {
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
   const fileInputRef = useRef(null);
+  const isComposingRef = useRef(false);
+  const pendingSelectionRef = useRef(null);
+
+  const setHostText = useCallback((nextText, selectionStart, selectionEnd) => {
+    const applied = applyHostDirection(
+      nextText,
+      selectionStart ?? String(nextText ?? "").length,
+      selectionEnd ?? selectionStart ?? String(nextText ?? "").length
+    );
+    pendingSelectionRef.current = {
+      start: applied.selectionStart,
+      end: applied.selectionEnd,
+    };
+    setText(applied.text);
+    return applied;
+  }, []);
+
+  useLayoutEffect(() => {
+    const pending = pendingSelectionRef.current;
+    const textarea = textareaRef.current;
+    if (!pending || !textarea) return;
+    textarea.setSelectionRange(pending.start, pending.end);
+    pendingSelectionRef.current = null;
+  }, [text]);
 
   // Load history and check mode status on mount
   useEffect(() => {
@@ -177,7 +203,7 @@ function App() {
       });
 
       const newText = text ? `${text}\n\n${response.data.text}` : response.data.text;
-      setText(newText);
+      setHostText(newText);
       setLastUsedMode(response.data.mode);
       
       const modeLabel = response.data.mode === "online" ? "أونلاين" : "بدون إنترنت";
@@ -234,13 +260,27 @@ function App() {
     const start = textarea.selectionStart;
     const end = textarea.selectionEnd;
     const newText = text.substring(0, start) + mark + text.substring(end);
-    
-    setText(newText);
-    
-    setTimeout(() => {
-      textarea.focus();
-      textarea.setSelectionRange(start + mark.length, start + mark.length);
-    }, 0);
+    setHostText(newText, start + mark.length, start + mark.length);
+    setTimeout(() => textarea.focus(), 0);
+  };
+
+  const handleEditorChange = (event) => {
+    const { value, selectionStart, selectionEnd } = event.target;
+    if (isComposingRef.current) {
+      setText(value);
+      return;
+    }
+    setHostText(value, selectionStart, selectionEnd);
+  };
+
+  const handleCompositionStart = () => {
+    isComposingRef.current = true;
+  };
+
+  const handleCompositionEnd = (event) => {
+    isComposingRef.current = false;
+    const { value, selectionStart, selectionEnd } = event.target;
+    setHostText(value, selectionStart, selectionEnd);
   };
 
   const copyToClipboard = async () => {
@@ -262,7 +302,7 @@ function App() {
 
     try {
       await axios.post(`${API}/transcriptions`, {
-        text: text.trim(),
+        text: stripBidiMarks(text).trim(),
         original_filename: "manual_entry",
       });
       toast.success("تم الحفظ!");
@@ -284,7 +324,7 @@ function App() {
       const response = await axios.post(
         `${API}/export`,
         {
-          text: text.trim(),
+          text: stripBidiMarks(text).trim(),
           format: format,
           filename: `transcription_${new Date().toISOString().slice(0, 10)}`,
         },
@@ -313,7 +353,7 @@ function App() {
   };
 
   const loadFromHistory = (item) => {
-    setText(item.text);
+    setHostText(item.text);
     setShowHistory(false);
     toast.success("تم تحميل النص");
   };
@@ -345,7 +385,7 @@ function App() {
 
   return (
     <div className="app-container min-h-screen bg-[#fdfbf7] dark:bg-[#0f172a]" dir="rtl">
-      <Toaster position="top-center" richColors />
+      <Toaster position="top-center" richColors dir="rtl" />
       
       {/* Header */}
       <header className="sticky top-0 z-50 glass border-b border-slate-200 dark:border-slate-800">
@@ -576,9 +616,10 @@ function App() {
                         >
                           <div className="flex items-start justify-between gap-2">
                             <div className="flex-1 min-w-0">
-                              <p className="text-sm text-slate-700 dark:text-slate-300 truncate">
-                                {item.text.substring(0, 50)}...
-                              </p>
+                              <HostText
+                                className="block text-sm text-slate-700 dark:text-slate-300 truncate"
+                                text={`${item.text.substring(0, 50)}...`}
+                              />
                               <p className="text-xs text-slate-400 mt-1">
                                 {new Date(item.created_at).toLocaleDateString("ar-SA")}
                               </p>
@@ -732,8 +773,12 @@ function App() {
                 
                 <textarea
                   ref={textareaRef}
+                  dir="rtl"
+                  lang="ar"
                   value={text}
-                  onChange={(e) => setText(e.target.value)}
+                  onChange={handleEditorChange}
+                  onCompositionStart={handleCompositionStart}
+                  onCompositionEnd={handleCompositionEnd}
                   placeholder="سيظهر النص المحوّل هنا..."
                   className="editor-textarea"
                   data-testid="text-editor"
@@ -766,9 +811,9 @@ function App() {
 
             {/* Character Count */}
             {text && (
-              <div className="mt-3 text-left">
+              <div className="mt-3 text-end">
                 <span className="text-sm text-slate-400">
-                  {text.length} حرف • {text.split(/\s+/).filter(Boolean).length} كلمة
+                  {stripBidiMarks(text).length} حرف • {stripBidiMarks(text).split(/\s+/).filter(Boolean).length} كلمة
                 </span>
               </div>
             )}
