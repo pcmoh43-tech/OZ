@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 import tempfile
 import io
 import asyncio
+from writing_direction import visual_rtl_line
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -281,8 +282,6 @@ async def export_text(request: ExportRequest):
             from reportlab.pdfbase import pdfmetrics
             from reportlab.pdfbase.ttfonts import TTFont
             from reportlab.lib.units import inch
-            import arabic_reshaper
-            from bidi.algorithm import get_display
             
             # Create PDF in memory
             buffer = io.BytesIO()
@@ -293,54 +292,46 @@ async def export_text(request: ExportRequest):
             try:
                 pdfmetrics.registerFont(TTFont('Arabic', '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'))
                 font_name = 'Arabic'
-            except:
+            except Exception:
                 font_name = 'Helvetica'
             
             c.setFont(font_name, 14)
-            
-            # Process Arabic text for proper RTL display
-            try:
-                reshaped_text = arabic_reshaper.reshape(request.text)
-                bidi_text = get_display(reshaped_text)
-            except:
-                bidi_text = request.text
-            
-            # Split text into lines
-            lines = bidi_text.split('\n')
+
+            usable_width = width - 2 * inch
             y_position = height - inch
             line_height = 20
-            
-            for line in lines:
-                words = line.split()
-                current_line = ""
-                
+
+            def draw_logical_line(logical_line):
+                nonlocal y_position
+                visual = visual_rtl_line(logical_line)
+                text_width = c.stringWidth(visual, font_name, 14)
+                c.drawString(width - inch - text_width, y_position, visual)
+                y_position -= line_height
+                if y_position < inch:
+                    c.showPage()
+                    c.setFont(font_name, 14)
+                    y_position = height - inch
+
+            # Wrap logical words, then render each wrapped line with an RTL base.
+            for logical_line in request.text.split('\n'):
+                words = logical_line.split()
+                if not words:
+                    draw_logical_line("")
+                    continue
+
+                current_words = []
                 for word in words:
-                    test_line = current_line + " " + word if current_line else word
-                    if c.stringWidth(test_line, font_name, 14) < width - 2*inch:
-                        current_line = test_line
+                    candidate = " ".join(current_words + [word]) if current_words else word
+                    visual_candidate = visual_rtl_line(candidate)
+                    if c.stringWidth(visual_candidate, font_name, 14) < usable_width or not current_words:
+                        current_words.append(word)
                     else:
-                        if current_line:
-                            text_width = c.stringWidth(current_line, font_name, 14)
-                            c.drawString(width - inch - text_width, y_position, current_line)
-                            y_position -= line_height
-                            
-                            if y_position < inch:
-                                c.showPage()
-                                c.setFont(font_name, 14)
-                                y_position = height - inch
-                        
-                        current_line = word
-                
-                if current_line:
-                    text_width = c.stringWidth(current_line, font_name, 14)
-                    c.drawString(width - inch - text_width, y_position, current_line)
-                    y_position -= line_height
-                    
-                    if y_position < inch:
-                        c.showPage()
-                        c.setFont(font_name, 14)
-                        y_position = height - inch
-            
+                        draw_logical_line(" ".join(current_words))
+                        current_words = [word]
+
+                if current_words:
+                    draw_logical_line(" ".join(current_words))
+
             c.save()
             buffer.seek(0)
             

@@ -2,6 +2,7 @@
 .app-container {
     min-height: 100vh;
     direction: rtl;
+    unicode-bidi: isolate;
 }
 
 /* Record button glow */
@@ -92,7 +93,8 @@
     min-height: 400px;
     width: 100%;
     direction: rtl;
-    text-align: right;
+    unicode-bidi: isolate;
+    text-align: start;
 }
 
 .editor-textarea::placeholder {

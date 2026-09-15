@@ -10,11 +10,41 @@
     box-sizing: border-box;
 }
 
+html {
+    direction: rtl;
+    unicode-bidi: isolate;
+}
+
 body {
     font-family: 'IBM Plex Sans Arabic', sans-serif;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     background-color: #fdfbf7;
+    direction: rtl;
+    unicode-bidi: isolate;
+}
+
+#root {
+    direction: rtl;
+    unicode-bidi: isolate;
+}
+
+/*
+ * Browsers set unicode-bidi: plaintext on textarea/input, so the first
+ * strong character (an English word) can reverse the rest of the sentence.
+ * Isolate + rtl keeps Arabic as the host direction for the whole surface.
+ */
+textarea,
+input:not([type="file"]):not([type="hidden"]):not([type="checkbox"]):not([type="radio"]),
+[contenteditable="true"] {
+    direction: rtl;
+    unicode-bidi: isolate;
+    text-align: start;
+}
+
+.embedded-ltr {
+    direction: ltr;
+    unicode-bidi: isolate;
 }
 
 code {
