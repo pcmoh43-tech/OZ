@@ -157,6 +157,12 @@ ipconfig /flushdns | Out-Null
 Ok "DNS cache flushed"
 
 Say "`n[6/6] Measuring AFTER..." "Yellow"
+Say "   Waiting for WiFi to reconnect after adapter changes (up to 45s)..." "DarkGray"
+$deadline = (Get-Date).AddSeconds(45)
+do {
+    Start-Sleep -Seconds 3
+    $up = Test-Connection -ComputerName 1.1.1.1 -Count 1 -Quiet -ErrorAction SilentlyContinue
+} while (-not $up -and (Get-Date) -lt $deadline)
 Start-Sleep -Seconds 3
 $after = Measure-Latency
 Say ("   After:  avg={0}ms max={1}ms loss={2}%" -f $after.Avg, $after.Max, $after.Loss)
